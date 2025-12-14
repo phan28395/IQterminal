@@ -8,6 +8,16 @@ cache_dir = "cache"
 # Enable/disable adapters.
 sec_enabled = true
 
+# SEC requires a descriptive User-Agent that includes a way to contact you.
+# Example: "IQterminal/0.1 (contact: you@domain.com)"
+sec_user_agent = "IQterminal/0.1 (contact: example@example.com)"
+
+# How many recent filings to ingest per ticker on each refresh.
+sec_filings_per_ticker = 50
+
+# Simple per-request throttle (seconds) to be gentle with SEC endpoints.
+sec_throttle_seconds = 0.2
+
 [ui]
 # Default theme for the Textual app.
 theme = "light"

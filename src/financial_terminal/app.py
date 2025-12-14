@@ -2,6 +2,7 @@ from pathlib import Path
 
 from rich.text import Text
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, ContentSwitcher, DataTable, Footer, Header, Input, Static, Tab, Tabs, Tree
@@ -30,7 +31,6 @@ class FinancialTerminal(App[None]):
         self.engine = get_engine(Path("financial_terminal.db"))
         self.session = get_session(self.engine)
         dao.init_db(self.session)
-        self.poller = Poller(self.session, self.config)
         self.filter_symbol: str | None = None
         super().__init__()
 
@@ -104,6 +104,7 @@ class FinancialTerminal(App[None]):
         content = self.query_one("#content-switcher", ContentSwitcher)
         content.current = "dashboard"
         self._set_status(f"Tickers: {self._ticker_count()}")
+        self._start_filings_polling()
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         content = self.query_one("#content-switcher", ContentSwitcher)
@@ -213,6 +214,7 @@ class FinancialTerminal(App[None]):
                 self.filter_symbol = symbol
                 self.refresh_watchlist()
                 self.refresh_filings_table()
+                self.refresh_filings_from_sec([symbol])
                 self.pop_screen()
         if event.data_table.id == "search-suggestions":
             try:
@@ -232,6 +234,7 @@ class FinancialTerminal(App[None]):
             self.filter_symbol = symbol
             self.refresh_watchlist()
             self.refresh_filings_table()
+            self.refresh_filings_from_sec([symbol])
             try:
                 self._mark_suggestion_added(event.row_key)
             except Exception:
@@ -248,6 +251,7 @@ class FinancialTerminal(App[None]):
         self.refresh_watchlist()
         self.refresh_filings_table()
         self.refresh_search_suggestions("")
+        self.refresh_filings_from_sec([ticker.symbol])
 
     def refresh_watchlist(self) -> None:
         tree = self.query_one("#watchlist-tree", Tree)
@@ -270,20 +274,63 @@ class FinancialTerminal(App[None]):
     def refresh_filings_table(self) -> None:
         filings_table = self.query_one("#filings-table", DataTable)
         filings_table.clear()
-        # Only show filings when a ticker is selected.
-        if not self.filter_symbol:
+        symbols = [self.filter_symbol] if self.filter_symbol else [t.symbol for t in dao.list_watchlist(self.session)]
+        if not symbols:
             return
 
-        rows = dao.list_filings_for_symbols(self.session, [self.filter_symbol], limit=200)
+        rows = dao.list_filings_for_symbols(self.session, symbols, limit=200)
         for filing, ticker in rows:
             date_display = filing.date.isoformat() if hasattr(filing.date, "isoformat") else str(filing.date)
             filings_table.add_row(date_display, filing.type, ticker.symbol, filing.title or "", "NEW" if filing.is_new else "")
 
     def action_refresh_filings(self) -> None:
-        new_filings = self.poller.run_once()
-        if new_filings:
+        self.refresh_filings_from_sec()
+
+    def _start_filings_polling(self) -> None:
+        """
+        Periodically refresh filings for the current watchlist (SEC only for now).
+        """
+        interval = max(30, int(self.config.poll_interval_seconds))
+        self.set_interval(interval, self.refresh_filings_from_sec, name="sec_filings_poll")
+        self.refresh_filings_from_sec()
+
+    def refresh_filings_from_sec(self, symbols: list[str] | None = None) -> None:
+        """
+        Refresh SEC filings in a background worker to keep the UI responsive.
+        """
+        watchlist = dao.list_watchlist(self.session)
+        if not watchlist:
+            return
+        target = ", ".join(symbols) if symbols else f"{len(watchlist)} tickers"
+        self._set_status(f"Status: Refreshing SEC filings ({target})...")
+        self._refresh_filings_worker(symbols)
+
+    @work(thread=True, exclusive=True, group="sec_filings")
+    def _refresh_filings_worker(self, symbols: list[str] | None = None) -> None:
+        session = get_session(self.engine)
+        try:
+            poller = Poller(session, self.config)
+            new_count = len(poller.run_once(symbols=symbols))
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Status: SEC filings refresh failed ({exc})")
+            return
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+        self.call_from_thread(self._on_filings_refreshed, new_count)
+
+    def _on_filings_refreshed(self, new_count: int) -> None:
+        try:
+            self.session.expire_all()
+        except Exception:
+            pass
+        if new_count:
             self.refresh_watchlist()
         self.refresh_filings_table()
+        self._set_status(f"Status: Filings refreshed (+{new_count} new)")
 
     def action_refresh_sec_tickers(self) -> None:
         """
