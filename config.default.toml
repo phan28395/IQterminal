@@ -1,0 +1,13 @@
+# Polling cadence in seconds for filings refresh.
+poll_interval_seconds = 900
+
+# Path where fetched filings and caches will be stored.
+cache_dir = "cache"
+
+[sources]
+# Enable/disable adapters.
+sec_enabled = true
+
+[ui]
+# Default theme for the Textual app.
+theme = "light"
